@@ -65,7 +65,7 @@ class StorageClientCharm(ops.CharmBase):
     
     def _handle_event(self, event: ops.EventBase) -> None:
         if not self._mount_manager.installed:
-            self.app.status = ops.MaintenanceStatus("Installing required packages...")
+            self.unit.status = ops.MaintenanceStatus("Installing required packages...")
             self._mount_manager.ensure(apt.PackageState.Present)
 
         try:
@@ -96,7 +96,7 @@ class StorageClientCharm(ops.CharmBase):
             opts.append('ro' if options.get("read-only") else "rw")
             self._mount_manager.mount(share, mountpoint, options=opts)
         
-        self.app.status = ops.ActiveStatus("Mounted shares.")
+        self.unit.status = ops.ActiveStatus("Mounted shares.")
 
     @property
     def peers(self) -> Optional[ops.Relation]:
