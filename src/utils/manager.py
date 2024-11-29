@@ -67,7 +67,7 @@ class MountManager:
         return True
 
     def ensure(self, state: apt.PackageState) -> None:
-        """Ensure that the mount packages are on the specified state.
+        """Ensure that the mount packages are in the specified state.
 
         Raises:
             Error: Raised if this failed to change the state of any of the required packages.

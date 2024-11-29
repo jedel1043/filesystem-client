@@ -19,8 +19,8 @@ from jsonschema import validate, ValidationError
 
 logger = logging.getLogger(__name__)
 
-# TODO: Add "$schema": "http://json-schema.org/draft-04/schema#",
 CONFIG_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-04/schema#",
     "type": "object",
     "additionalProperties": {
         "type": "object",
