@@ -50,7 +50,7 @@ class StorageClientCharm(ops.CharmBase):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        # Charm events defined in the NFsRequires class.
+        # Charm events defined in the FsRequires class.
         self.fs_share = FsRequires(self, "fs-share")
         self.framework.observe(
             self.fs_share.on.mount_share,
@@ -58,7 +58,7 @@ class StorageClientCharm(ops.CharmBase):
         )
 
     def _on_server_connected(self, event: MountShareEvent) -> None:
-        # Handle when new NFS server is connected.
+        # Handle when new filesystem server is connected.
 
         share_info = event.share_info
 
@@ -147,7 +147,40 @@ class FsInterfacesError(Exception):
 class ParseError(FsInterfacesError):
     """Exception raised when a parse operation from an URI failed."""
 
-
+# Design-wise, this class represents the grammar that relations use to
+# share data between providers and requirers:
+#
+# key = 1*( unreserved )
+# value = 1*( unreserved / ":" / "/" / "?" / "#" / "[" / "]" / "@" / "!" / "$"
+#       / "'" / "(" / ")" / "*" / "+" / "," / ";" )
+# options = key "=" value ["&" options]
+# host-port = host [":" port]
+# hosts = host-port [',' hosts]
+# authority = [userinfo "@"] "(" hosts ")"
+# URI = scheme "://" authority path-absolute ["?" options]
+#
+# Unspecified grammar rules are given by [RFC 3986](https://datatracker.ietf.org/doc/html/rfc3986#appendix-A).
+# 
+# This essentially leaves 5 components that the library can use to share data:
+# - scheme: representing the type of filesystem.
+# - hosts: representing the list of hosts where the filesystem lives. For NFS it should be a single element,
+#   but CephFS and Lustre use more than one endpoint.
+# - user: Any kind of authentication user that the client must specify to mount the filesystem.
+# - path: The internally exported path of each filesystem. Could be optional if a filesystem exports its
+#   whole tree, but at the very least NFS, CephFS and Lustre require an export path.
+# - options: Some filesystems will require additional options for its specific mount command (e.g. Ceph).
+#
+# Putting all together, this allows sharing the required data using simple URI strings:
+# ```
+# <scheme>://<user>@(<host>,*)/<path>/?<options>
+#
+# nfs://(192.168.1.1:65535)/export
+# ceph://fsuser@(192.168.1.1,192.168.1.2,192.168.1.3)/export?fsid=asdf1234&auth=plain:QWERTY1234&filesystem=fs_name
+# ceph://fsuser@(192.168.1.1,192.168.1.2,192.168.1.3)/export?fsid=asdf1234&auth=secret:YXNkZnF3ZXJhc2RmcXdlcmFzZGZxd2Vy&filesystem=fs_name
+# lustre://(192.168.227.11%40tcp1,192.168.227.12%40tcp1)/export
+# ```
+#
+# Note how in the Lustre URI we needed to escape the `@` symbol on the hosts to conform with the URI syntax.
 @dataclass(init=False, frozen=True)
 class _UriData:
     """Raw data from the endpoint URI of a relation."""
@@ -218,40 +251,36 @@ class _UriData:
 
 
 def _hostinfo(host: str) -> tuple[str, Optional[int]]:
-    # IPv6
-    if host.startswith("["):
-        parts = iter(host[1:].split("]", maxsplit=1))
-        host = next(parts)
+    """Parse a host string into the hostname and the port."""
+    if len(host) == 0:
+        raise ParseError("invalid empty host")
 
-        if (port := next(parts, None)) is None:
+    pos = 0
+    if host[pos] == "[":
+        # IPv6
+        pos = host.find(']', pos)
+        if pos == -1:
             raise ParseError("unclosed bracket for host")
+        hostname = host[1:pos]
+        pos = pos + 1
+    else:
+        # IPv4 or DN
+        pos = host.find(':', pos)
+        if pos == -1:
+            pos = len(host)
+        hostname = host[:pos]
+    
+    if pos == len(host):
+        return hostname, None
 
-        if not port:
-            return host, None
-
-        if not port.startswith(":"):
-            raise ParseError("invalid syntax for host")
-
-        try:
-            port = int(port[1:])
-        except ValueError:
-            raise ParseError("invalid port on host")
-
-        return host, port
-
-    # IPv4 or hostname
-    parts = iter(host.split(":", maxsplit=1))
-    host = next(parts)
-    if (port := next(parts, None)) is None:
-        return host, None
-
+    # more characters after the hostname <==> port
+    
+    if hostname[pos] != ":":
+        raise ParseError("expected `:` after IPv6 address")
     try:
-        port = int(port)
+        port = int(host[pos + 1:])
     except ValueError:
-        raise ParseError("invalid port on host")
-
-    return host, port
-
+        raise ParseError("expected int after `:` in host")
 
 
 T = TypeVar("T", bound="ShareInfo")
@@ -340,13 +369,25 @@ class NfsInfo(FsInfo):
 @dataclass(frozen=True)
 class CephfsInfo(FsInfo):
     """Information required to mount a CephFS share."""
+    
     fsid: str
-    name: str
-    path: str
-    monitor_hosts: [str]
-    user: str
-    key: str
+    """Cluster identifier."""
 
+    name: str
+    """Name of the exported filesystem."""
+
+    path: str
+    """Path exported within the filesystem."""
+
+    monitor_hosts: [str]
+    """List of reachable monitor hosts."""
+
+    user: str
+    """Ceph user authorized to access the filesystem."""
+
+    key: str
+    """Cephx key for the authorized user."""
+    
     @classmethod
     def from_uri(cls, uri: str, model: Model) -> "CephfsInfo":
         info = _parse_uri(uri)
@@ -395,11 +436,6 @@ class CephfsInfo(FsInfo):
         return CephfsInfo(fsid=fsid, name=name, path=path, monitor_hosts=monitor_hosts, user=user, key=key)
 
     def to_uri(self, model: Model) -> str:
-        scheme = self.fs_type()
-        hosts = self.monitor_hosts
-        path = self.path
-        user = self.user
-
         secret = self._get_or_create_auth_secret(model)
 
         options = {
@@ -409,8 +445,7 @@ class CephfsInfo(FsInfo):
             "auth-rev": str(secret.get_info().revision),
         }
 
-
-        return _to_uri(scheme=scheme, hosts=hosts, path=self.path)
+        return str(_UriData(scheme=self.fs_type(), hosts=self.monitor_hosts, path=self.path, user=self.user, options=options))
     
     @abstractmethod
     def grant(self, model: Model, relation: Relation):
