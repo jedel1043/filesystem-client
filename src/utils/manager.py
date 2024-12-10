@@ -14,7 +14,7 @@ from typing import Iterator, List, Optional, Union
 
 import charms.operator_libs_linux.v0.apt as apt
 import charms.operator_libs_linux.v1.systemd as systemd
-from charms.storage_client.v0.fs_interfaces import NfsInfo, FsInfo
+from charms.filesystem_client.v0.fs_interfaces import FsInfo, NfsInfo
 
 _logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class Error(Exception):
         return self.args[0]
 
     def __repr__(self):
-        """String representation of the error."""
+        """Return the string representation of the error."""
         return f"<{type(self).__module__}.{type(self).__name__} {self.args}>"
 
 
@@ -53,7 +53,9 @@ class MountInfo:
     passno: str
 
 
-class MountManager:
+class MountsManager:
+    """Manager for mounted filesystems in the current system."""
+
     @property
     def _packages(self) -> List[apt.DebianPackage]:
         if not self._pkgs:

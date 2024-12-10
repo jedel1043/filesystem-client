@@ -7,7 +7,7 @@
 import logging
 
 import ops
-from charms.storage_client.v0.fs_interfaces import FsProvides, NfsInfo
+from charms.filesystem_client.v0.interfaces import FsProvides, NfsInfo
 
 _logger = logging.getLogger(__name__)
 

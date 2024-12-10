@@ -17,7 +17,7 @@
 This library contains the FsProvides and FsRequires classes for managing an
 integration between a filesystem server operator and a filesystem client operator.
 
-## ShareInfo (filesystem mount data)
+## FsInfo (filesystem mount information)
 
 This abstract class defines the methods that a filesystem type must expose for providers and
 consumers. Any subclass of this class will be compatible with the other methods exposed
@@ -26,13 +26,13 @@ filesystems to support.
 
 ## FsRequires (filesystem client)
 
-This class provides a uniform interface for charms that need to mount or unmount filesystem shares,
+This class provides a uniform interface for charms that need to mount or unmount filesystems,
 and convenience methods for consuming data sent by a filesystem server charm.
 
 ### Defined events
 
-- `mount_share`: Event emitted when the filesystem is ready to be mounted.
-- `umount_share`: Event emitted when the filesystem needs to be unmounted.
+- `mount_fs`: Event emitted when the filesystem is ready to be mounted.
+- `umount_fs`: Event emitted when the filesystem needs to be unmounted.
 
 ### Example
 
@@ -40,46 +40,46 @@ and convenience methods for consuming data sent by a filesystem server charm.
 import ops
 from charms.storage_libs.v0.fs_interfaces import (
     FsRequires,
-    MountShareEvent,
+    MountFsEvent,
 )
 
 
 class StorageClientCharm(ops.CharmBase):
-    # Application charm that needs to mount filesystem shares.
+    # Application charm that needs to mount filesystems.
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         # Charm events defined in the FsRequires class.
-        self.fs_share = FsRequires(self, "fs-share")
+        self._fs = FsRequires(self, "fs-share")
         self.framework.observe(
-            self.fs_share.on.mount_share,
-            self._on_mount_share,
+            self._fs.on.mount_fs,
+            self._on_mount_fs,
         )
 
-    def _on_server_connected(self, event: MountShareEvent) -> None:
+    def _on_mount_fs(self, event: MountShareEvent) -> None:
         # Handle when new filesystem server is connected.
 
-        share_info = event.share_info
+        fs_info = event.fs_info
 
-        self.mount("/mnt", share_info)
+        self.mount("/mnt", fs_info)
 
-        self.unit.status = ops.ActiveStatus("Mounted share at `/mnt`.")
+        self.unit.status = ops.ActiveStatus("Mounted filesystem at `/mnt`.")
 ```
 
 ## FsProvides (filesystem server)
 
-This library provides a uniform interface for charms that expose filesystem shares.
+This library provides a uniform interface for charms that expose filesystems.
 
-> __Note:__ It is the responsibility of the filesystem Provider charm to provide
-> the implementation for creating a new filesystem share. FsProvides just provides
+> __Note:__ It is the responsibility of the provider charm to have
+> the implementation for creating a new filesystem share. FsProvides just exposes
 > the interface for the integration.
 
 ### Example
 
 ```python
 import ops
-from charms.storage_client.v0.fs_interfaces import (
+from charms.filesystem_client.v0.fs_interfaces import (
     FsProvides,
     NfsInfo,
 )
@@ -87,12 +87,12 @@ from charms.storage_client.v0.fs_interfaces import (
 class StorageServerCharm(ops.CharmBase):
     def __init__(self, framework: ops.Framework):
         super().__init__(framework)
-        self._fs_share = FsProvides(self, "fs-share", "server-peers")
+        self._fs = FsProvides(self, "fs-share", "server-peers")
         framework.observe(self.on.start, self._on_start)
 
     def _on_start(self, event: ops.StartEvent):
         # Handle start event.
-        self._fs_share.set_fs_info(NfsInfo("192.168.1.254", 65535, "/srv"))
+        self._fs.set_fs_info(NfsInfo("192.168.1.254", 65535, "/srv"))
         self.unit.status = ops.ActiveStatus()
 ```
 """
@@ -101,7 +101,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from ipaddress import AddressValueError, IPv6Address
-from typing import Dict, List, Optional, TypeVar
+from typing import List, Optional, TypeVar
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunsplit
 
 import ops
@@ -117,13 +117,14 @@ from ops.framework import EventSource, Object
 from ops.model import Model, Relation
 
 __all__ = [
-    "FsInterfacesError",
+    "InterfacesError",
     "ParseError",
-    "Share",
-    "ShareInfo",
+    "FsInfo",
     "NfsInfo",
-    "MountShareEvent",
-    "UmountShareEvent",
+    "CephfsInfo",
+    "Endpoint",
+    "MountFsEvent",
+    "UmountFsEvent",
     "FsRequires",
     "FsProvides",
 ]
@@ -140,12 +141,14 @@ LIBPATCH = 1
 
 _logger = logging.getLogger(__name__)
 
-class FsInterfacesError(Exception):
-    """Exception raised when a filesystem operation failed."""
+
+class InterfacesError(Exception):
+    """Exception raised when an operation failed."""
 
 
-class ParseError(FsInterfacesError):
+class ParseError(InterfacesError):
     """Exception raised when a parse operation from an URI failed."""
+
 
 # Design-wise, this class represents the grammar that relations use to
 # share data between providers and requirers:
@@ -160,7 +163,7 @@ class ParseError(FsInterfacesError):
 # URI = scheme "://" authority path-absolute ["?" options]
 #
 # Unspecified grammar rules are given by [RFC 3986](https://datatracker.ietf.org/doc/html/rfc3986#appendix-A).
-# 
+#
 # This essentially leaves 5 components that the library can use to share data:
 # - scheme: representing the type of filesystem.
 # - hosts: representing the list of hosts where the filesystem lives. For NFS it should be a single element,
@@ -184,6 +187,7 @@ class ParseError(FsInterfacesError):
 @dataclass(init=False, frozen=True)
 class _UriData:
     """Raw data from the endpoint URI of a relation."""
+
     scheme: str
     """Scheme used to identify a filesystem.
 
@@ -202,23 +206,29 @@ class _UriData:
     options: dict[str, str]
     """Additional options that could be required to mount the filesystem."""
 
-    def __init__(self, scheme: str, hosts: [str], user: str = "", path: str = "", options: dict[str, str] = {}):
+    def __init__(
+        self,
+        scheme: str,
+        hosts: [str],
+        user: str = "",
+        path: str = "",
+        options: dict[str, str] = {},
+    ):
         if not scheme:
-            raise FsInterfacesError("scheme cannot be empty")
+            raise InterfacesError("scheme cannot be empty")
         if len(hosts) == 0:
-            raise FsInterfacesError("list of hosts cannot be empty")
+            raise InterfacesError("list of hosts cannot be empty")
 
         # Strictly convert to the required types to avoid passing through weird data.
         self.scheme = str(scheme)
         self.hosts = [str(host) for host in hosts]
         self.user = str(user) if user else ""
         self.path = str(path) if path else "/"
-        self.options = { str(k): str(v) for k,v in options.items() } if options else {}
+        self.options = {str(k): str(v) for k, v in options.items()} if options else {}
 
     @classmethod
-    def from_uri(uri: str) -> _UriData:
+    def from_uri(cls, uri: str) -> "_UriData":
         """Convert an URI string into a `_UriData`."""
-
         _logger.debug(f"parsing `{uri}`")
 
         uri = urlparse(uri, allow_fragments=False)
@@ -239,13 +249,13 @@ class _UriData:
             raise ParseError("invalid options for endpoint info")
         try:
             return _UriData(scheme=scheme, user=user, hosts=hosts, path=path, options=options)
-        except FsInterfacesError as e:
+        except InterfacesError as e:
             raise ParseError(*e.args)
 
     def __str__(self) -> str:
         user = quote(self.user)
         hostname = quote(",".join(self.hosts))
-        netloc = f"{user}@" if user else "" + f"({self.hostname})"
+        netloc = f"{user}@" if user else "" + f"({hostname})"
         query = urlencode(self.options)
         return urlunsplit((self.scheme, netloc, self.path, query, None))
 
@@ -258,40 +268,43 @@ def _hostinfo(host: str) -> tuple[str, Optional[int]]:
     pos = 0
     if host[pos] == "[":
         # IPv6
-        pos = host.find(']', pos)
+        pos = host.find("]", pos)
         if pos == -1:
             raise ParseError("unclosed bracket for host")
         hostname = host[1:pos]
         pos = pos + 1
     else:
         # IPv4 or DN
-        pos = host.find(':', pos)
+        pos = host.find(":", pos)
         if pos == -1:
             pos = len(host)
         hostname = host[:pos]
-    
+
     if pos == len(host):
         return hostname, None
 
     # more characters after the hostname <==> port
-    
-    if hostname[pos] != ":":
+
+    if host[pos] != ":":
         raise ParseError("expected `:` after IPv6 address")
     try:
-        port = int(host[pos + 1:])
+        port = int(host[pos + 1 :])
     except ValueError:
         raise ParseError("expected int after `:` in host")
 
+    return hostname, port
 
-T = TypeVar("T", bound="ShareInfo")
+
+T = TypeVar("T", bound="FsInfo")
 
 
 class FsInfo(ABC):
     """Information to mount a filesystem.
 
     This is an abstract class that exposes a set of required methods. All filesystems that
-    can be handled by this library must derive this abstract class. 
+    can be handled by this library must derive this abstract class.
     """
+
     @classmethod
     @abstractmethod
     def from_uri(cls: type[T], uri: str, model: Model) -> T:
@@ -315,6 +328,7 @@ class FsInfo(ABC):
     def fs_type(cls) -> str:
         """Get the string identifier of this filesystem type."""
 
+
 @dataclass(frozen=True)
 class NfsInfo(FsInfo):
     """Information required to mount an NFS share."""
@@ -330,13 +344,14 @@ class NfsInfo(FsInfo):
 
     @classmethod
     def from_uri(cls, uri: str, _model: Model) -> "NfsInfo":
+        """See :py:meth:`FsInfo.from_uri` for documentation on this method."""
         info = _UriData.from_uri(uri)
 
         if info.scheme != cls.fs_type():
             raise ParseError(
                 "could not parse `EndpointInfo` with incompatible scheme into `NfsInfo`"
             )
-        
+
         path = info.path
 
         if info.user:
@@ -352,6 +367,7 @@ class NfsInfo(FsInfo):
         return NfsInfo(hostname=hostname, port=port, path=path)
 
     def to_uri(self, _model: Model) -> str:
+        """See :py:meth:`FsInfo.to_uri` for documentation on this method."""
         try:
             IPv6Address(self.hostname)
             host = f"[{self.hostname}]"
@@ -364,12 +380,14 @@ class NfsInfo(FsInfo):
 
     @classmethod
     def fs_type(cls) -> str:
+        """See :py:meth:`FsInfo.fs_type` for documentation on this method."""
         return "nfs"
+
 
 @dataclass(frozen=True)
 class CephfsInfo(FsInfo):
     """Information required to mount a CephFS share."""
-    
+
     fsid: str
     """Cluster identifier."""
 
@@ -387,10 +405,11 @@ class CephfsInfo(FsInfo):
 
     key: str
     """Cephx key for the authorized user."""
-    
+
     @classmethod
     def from_uri(cls, uri: str, model: Model) -> "CephfsInfo":
-        info = _parse_uri(uri)
+        """See :py:meth:`FsInfo.from_uri` for documentation on this method."""
+        info = _UriData.from_uri(uri)
 
         if info.scheme != cls.fs_type():
             raise ParseError(
@@ -398,44 +417,41 @@ class CephfsInfo(FsInfo):
             )
 
         path = info.path
-        
+
         if not (user := info.user):
-            raise ParseError(
-                "missing user in uri for `CephfsInfo" 
-            )
-        
+            raise ParseError("missing user in uri for `CephfsInfo")
+
         if not (name := info.options.get("name")):
-            raise ParseError(
-                "missing name in uri for `CephfsInfo`"
-            )
-        
+            raise ParseError("missing name in uri for `CephfsInfo`")
+
         if not (fsid := info.options.get("fsid")):
-            raise ParseError(
-                "missing fsid in uri for `CephfsInfo`"
-            )
-        
+            raise ParseError("missing fsid in uri for `CephfsInfo`")
+
         monitor_hosts = info.hosts
 
         if not (auth := info.options.get("auth")):
-            raise ParseError(
-                "missing auth info in uri for `CephsInfo`"
-            )
+            raise ParseError("missing auth info in uri for `CephsInfo`")
 
         try:
             kind, data = auth.split(":", 1)
         except ValueError:
             raise ParseError("Could not get the kind of auth info")
-        
+
         if kind == "secret":
             key = model.get_secret(id=auth).get_content(refresh=True)["key"]
         elif kind == "plain":
+            # Enables being able to pass data from reactive charms (such as `ceph-fs`), since
+            # they don't support secrets.
             key = data
         else:
             raise ParseError("Invalid kind for auth info")
-        
-        return CephfsInfo(fsid=fsid, name=name, path=path, monitor_hosts=monitor_hosts, user=user, key=key)
+
+        return CephfsInfo(
+            fsid=fsid, name=name, path=path, monitor_hosts=monitor_hosts, user=user, key=key
+        )
 
     def to_uri(self, model: Model) -> str:
+        """See :py:meth:`FsInfo.to_uri` for documentation on this method."""
         secret = self._get_or_create_auth_secret(model)
 
         options = {
@@ -445,18 +461,27 @@ class CephfsInfo(FsInfo):
             "auth-rev": str(secret.get_info().revision),
         }
 
-        return str(_UriData(scheme=self.fs_type(), hosts=self.monitor_hosts, path=self.path, user=self.user, options=options))
-    
-    @abstractmethod
+        return str(
+            _UriData(
+                scheme=self.fs_type(),
+                hosts=self.monitor_hosts,
+                path=self.path,
+                user=self.user,
+                options=options,
+            )
+        )
+
     def grant(self, model: Model, relation: Relation):
-        self._get_or_create_auth_secret(model)
+        """See :py:meth:`FsInfo.grant` for documentation on this method."""
+        secret = self._get_or_create_auth_secret(model)
 
         secret.grant(relation)
 
     @classmethod
     def fs_type(cls) -> str:
+        """See :py:meth:`FsInfo.fs_type` for documentation on this method."""
         return "ceph"
-    
+
     def _get_or_create_auth_secret(self, model: Model) -> ops.Secret:
         try:
             secret = model.get_secret(label="auth")
@@ -465,29 +490,30 @@ class CephfsInfo(FsInfo):
             secret = model.app.add_secret(
                 self.key,
                 label="auth",
-                description="Cephx key to authenticate against the CephFS share"
+                description="Cephx key to authenticate against the CephFS share",
             )
         return secret
+
 
 @dataclass
 class Endpoint:
     """Endpoint data exposed by a filesystem server."""
-    
+
     fs_info: FsInfo
     """Filesystem information required to mount this endpoint."""
 
     uri: str
     """Raw URI exposed by this endpoint."""
 
-def _uri_to_share_info(uri: str, model: Model) -> FsInfo:
+
+def _uri_to_fs_info(uri: str, model: Model) -> FsInfo:
     match uri.split("://", maxsplit=1)[0]:
         case "nfs":
             return NfsInfo.from_uri(uri, model)
         case "ceph":
             return CephfsInfo.from_uri(uri, model)
         case _:
-            raise FsInterfacesError("unsupported share type")
-
+            raise InterfacesError("unsupported filesystem type")
 
 
 class _MountEvent(RelationEvent):
@@ -498,27 +524,26 @@ class _MountEvent(RelationEvent):
         """Get endpoint info."""
         if not (uri := self.relation.data[self.relation.app].get("endpoint")):
             return
-        return Endpoint(_uri_to_share_info(uri, self.framework.model), uri)
+        return Endpoint(_uri_to_fs_info(uri, self.framework.model), uri)
 
 
-class MountShareEvent(_MountEvent):
-    """Emit when FS share is ready to be mounted."""
+class MountFsEvent(_MountEvent):
+    """Emit when a filesystem is ready to be mounted."""
 
 
-class UmountShareEvent(_MountEvent):
-    """Emit when FS share needs to be unmounted."""
+class UmountFsEvent(_MountEvent):
+    """Emit when a filesystem needs to be unmounted."""
 
 
 class _FsRequiresEvents(CharmEvents):
     """Events that FS servers can emit."""
 
-    mount_share = EventSource(MountShareEvent)
-    umount_share = EventSource(UmountShareEvent)
-
+    mount_fs = EventSource(MountFsEvent)
+    umount_fs = EventSource(UmountFsEvent)
 
 
 class _BaseInterface(Object):
-    """Base methods required for FS share integration interfaces."""
+    """Base methods required for filesystem integration interfaces."""
 
     def __init__(self, charm: CharmBase, relation_name) -> None:
         super().__init__(charm, relation_name)
@@ -555,12 +580,12 @@ class FsRequires(_BaseInterface):
     def _on_relation_changed(self, event: RelationChangedEvent) -> None:
         """Handle when the databag between client and server has been updated."""
         _logger.debug("Emitting `MountShare` event from `RelationChanged` hook")
-        self.on.mount_share.emit(event.relation, app=event.app, unit=event.unit)
+        self.on.mount_fs.emit(event.relation, app=event.app, unit=event.unit)
 
     def _on_relation_departed(self, event: RelationDepartedEvent) -> None:
         """Handle when server departs integration."""
         _logger.debug("Emitting `UmountShare` event from `RelationDeparted` hook")
-        self.on.umount_share.emit(event.relation, app=event.app, unit=event.unit)
+        self.on.umount_fs.emit(event.relation, app=event.app, unit=event.unit)
 
     @property
     def endpoints(self) -> List[Endpoint]:
@@ -569,7 +594,7 @@ class FsRequires(_BaseInterface):
         for relation in self.relations:
             if not (uri := relation.data[relation.app].get("endpoint")):
                 pass
-            result.append(Endpoint(fs_info=_uri_to_share_info(uri, self.model), uri=uri))
+            result.append(Endpoint(fs_info=_uri_to_fs_info(uri, self.model), uri=uri))
         return result
 
 
@@ -585,7 +610,7 @@ class FsProvides(_BaseInterface):
         """Set information to mount a filesystem.
 
         Args:
-            share_info: Information required to mount the filesystem.
+            fs_info: Information required to mount the filesystem.
 
         Notes:
             Only the application leader unit can set the filesystem data.
@@ -605,8 +630,8 @@ class FsProvides(_BaseInterface):
         if not self.unit.is_leader() or not (endpoint := self._endpoint):
             return
 
-        share_info = _uri_to_share_info(endpoint, self.model)
-        share_info.grant(self.model, event.relation)
+        fs_info = _uri_to_fs_info(endpoint, self.model)
+        fs_info.grant(self.model, event.relation)
 
         event.relation.data[self.app]["endpoint"] = endpoint
 
@@ -634,7 +659,7 @@ class FsProvides(_BaseInterface):
     def _set_state(self, key: str, data: str) -> None:
         """Insert a value into the global state."""
         if not self._peers:
-            raise FsInterfacesError(
+            raise InterfacesError(
                 "Peer relation can only be accessed after the relation is established"
             )
 
