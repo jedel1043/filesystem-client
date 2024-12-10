@@ -1,33 +1,25 @@
 # Copyright 2024 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-name: storage-client
+name: filesystem-client
 
 type: charm
 
-title: Storage Client
+title: Filesystem Client
 
-summary: Mount filesystem shares on machine charms.
+summary: Mount filesystems on machine charms.
 
 description: |
-  Mount filesystem shares on machine charms.
+  Mount filesystems on machine charms.
 
-  Enables access to exported shares.
+  Enables access to exported filesystems.
 
-bases:
-  - build-on:
-      - name: ubuntu
-        channel: "22.04"
-    run-on:
-      - name: ubuntu
-        channel: "22.04"
+base: ubuntu@24.04
+platforms:
+  amd64:
 
 parts:
   charm:
-    charm-requirements: ["requirements.txt"]
-    override-build: |
-      cp /usr/bin/rustc-1.80 /usr/bin/rustc
-      craftctl default
     build-packages:
       - libffi-dev
       - libssl-dev
@@ -35,6 +27,16 @@ parts:
       - cargo
       - pkg-config
       - git
+      - just
+    build-snaps:
+      - astral-uv
+    charm-requirements: ["requirements.txt"]
+    charm-binary-python-packages:
+      - jsonschema ~= 4.23.0
+    override-build: |
+      just requirements
+      cp /usr/bin/rustc-1.80 /usr/bin/rustc
+      craftctl default
 
 subordinate: true
 
