@@ -21,12 +21,6 @@ platforms:
 parts:
   charm:
     build-packages:
-      - libffi-dev
-      - libssl-dev
-      - rustc-1.80
-      - cargo
-      - pkg-config
-      - git
       - just
     build-snaps:
       - astral-uv
@@ -35,7 +29,6 @@ parts:
       - jsonschema ~= 4.23.0
     override-build: |
       just requirements
-      cp /usr/bin/rustc-1.80 /usr/bin/rustc
       craftctl default
 
 subordinate: true
