@@ -4,21 +4,12 @@
 
 """Test the interfaces charm library."""
 
-import json
 import pytest
-from dataclasses import asdict
-
 from charms.filesystem_client.v0.interfaces import (
-    FsProvides,
     FsRequires,
-    MountFsEvent,
-    UmountFsEvent,
-    NfsInfo,
-    CephfsInfo,
-    _hostinfo
+    _hostinfo,
 )
 from ops import CharmBase
-from ops import testing
 
 FS_INTEGRATION_NAME = "fs-share"
 FS_INTEGRATION_INTERFACE = "fs_share"
@@ -32,13 +23,10 @@ requires:
 FSID = "123456789-0abc-defg-hijk-lmnopqrstuvw"
 NAME = "filesystem"
 PATH = "/data"
-MONITOR_HOSTS = [
-    ("192.168.1.1", 6789),
-    ("192.168.1.2", 6789),
-    ("192.168.1.3", 6789)
-]
+MONITOR_HOSTS = [("192.168.1.1", 6789), ("192.168.1.2", 6789), ("192.168.1.3", 6789)]
 USERNAME = "user"
 KEY = "R//appdqz4NP4Bxcc5XWrg=="
+
 
 class FsClientCharm(CharmBase):
     """Mock CephFS client charm for unit tests."""
@@ -49,8 +37,8 @@ class FsClientCharm(CharmBase):
         self.framework.observe(self.requirer.on.mount_fs, lambda *_: None)
         self.framework.observe(self.requirer.on.umount_fs, lambda *_: None)
 
-class TestInterface:
 
+class TestInterface:
     @pytest.mark.parametrize(
         ("host", "parsed"),
         [
@@ -60,7 +48,7 @@ class TestInterface:
             ("[2001:db8::2:1]:9876", ("2001:db8::2:1", 9876)),
             ("192.things.com", ("192.things.com", None)),
             ("192.things.com:1234", ("192.things.com", 1234)),
-        ]
+        ],
     )
     def test_hostinfo(self, host: str, parsed: tuple[str, int | None]):
         assert _hostinfo(host) == parsed

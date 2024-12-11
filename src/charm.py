@@ -38,7 +38,7 @@ CONFIG_SCHEMA = {
 PEER_NAME = "storage-peers"
 
 
-class StorageClientCharm(ops.CharmBase):
+class FilesystemClientCharm(ops.CharmBase):
     """Charm the application."""
 
     def __init__(self, framework: ops.Framework):
@@ -113,7 +113,7 @@ class StorageClientCharm(ops.CharmBase):
                     # Just in case, unmount the previously mounted share
                     if mount:
                         self._mounts_manager.umount(mount["mountpoint"])
-                    self._mounts_manager.mount(share, mountpoint, options=opts)
+                    self._mounts_manager.mount(share.fs_info, mountpoint, options=opts)
                     mounts[fs_type] = options
 
         self.unit.status = ops.ActiveStatus("Mounted shares.")
@@ -150,4 +150,4 @@ class StorageClientCharm(ops.CharmBase):
 
 
 if __name__ == "__main__":  # pragma: nocover
-    ops.main(StorageClientCharm)  # type: ignore
+    ops.main(FilesystemClientCharm)  # type: ignore

@@ -211,7 +211,7 @@ class _UriData:
         scheme: str,
         hosts: [str],
         user: str = "",
-        path: str = "",
+        path: str = "/",
         options: dict[str, str] = {},
     ):
         if not scheme:
@@ -220,33 +220,36 @@ class _UriData:
             raise InterfacesError("list of hosts cannot be empty")
 
         # Strictly convert to the required types to avoid passing through weird data.
-        self.scheme = str(scheme)
-        self.hosts = [str(host) for host in hosts]
-        self.user = str(user) if user else ""
-        self.path = str(path) if path else "/"
-        self.options = {str(k): str(v) for k, v in options.items()} if options else {}
+        object.__setattr__(self, "scheme", str(scheme))
+        object.__setattr__(self, "hosts", [str(host) for host in hosts])
+        object.__setattr__(self, "user", str(user) if user else "")
+        object.__setattr__(self, "path", str(path) if path else "/")
+        object.__setattr__(
+            self, "options", {str(k): str(v) for k, v in options.items()} if options else {}
+        )
 
     @classmethod
     def from_uri(cls, uri: str) -> "_UriData":
         """Convert an URI string into a `_UriData`."""
-        _logger.debug(f"parsing `{uri}`")
+        _logger.debug(f"_UriData.from_uri: parsing `{uri}`")
 
-        uri = urlparse(uri, allow_fragments=False)
-        scheme = str(uri.scheme)
-        user = unquote(uri.username)
-        hostname = unquote(uri.hostname)
+        result = urlparse(uri, allow_fragments=False)
+        scheme = str(result.scheme or "")
+        user = unquote(result.username or "")
+        hostname = unquote(result.hostname or "")
 
         if not hostname or hostname[0] != "(" or hostname[-1] != ")":
-            _logger.debug(f"parsing failed for hostname `{hostname}`")
-            raise ParseError("invalid list of hosts for endpoint")
+            raise ParseError(f"invalid list of hosts for endpoint `{uri}`")
 
-        hosts = hostname.split(",")
-        path = uri.path
+        hosts = hostname[1:-1].split(",")
+        path = unquote(result.path or "")
         try:
-            options = parse_qs(uri.query, strict_parsing=True)
+            options = {
+                key: ",".join(values)
+                for key, values in parse_qs(result.query, strict_parsing=True).items()
+            }
         except ValueError:
-            _logger.debug(f"parsing failed for query `{uri.query}`")
-            raise ParseError("invalid options for endpoint info")
+            raise ParseError(f"invalid options for endpoint `{uri}`")
         try:
             return _UriData(scheme=scheme, user=user, hosts=hosts, path=path, options=options)
         except InterfacesError as e:
@@ -255,13 +258,15 @@ class _UriData:
     def __str__(self) -> str:
         user = quote(self.user)
         hostname = quote(",".join(self.hosts))
-        netloc = f"{user}@" if user else "" + f"({hostname})"
+        path = quote(self.path)
+        netloc = f"{user}@({hostname})" if user else f"({hostname})"
         query = urlencode(self.options)
-        return urlunsplit((self.scheme, netloc, self.path, query, None))
+        return urlunsplit((self.scheme, netloc, path, query, None))
 
 
 def _hostinfo(host: str) -> tuple[str, Optional[int]]:
     """Parse a host string into the hostname and the port."""
+    _logger.debug(f"_hostinfo: parsing `{host}`")
     if len(host) == 0:
         raise ParseError("invalid empty host")
 
@@ -314,14 +319,12 @@ class FsInfo(ABC):
     def to_uri(self, model: Model) -> str:
         """Convert this `FsInfo` object into an URI string."""
 
-    @abstractmethod
     def grant(self, model: Model, relation: ops.Relation):
         """Grant permissions for a certain relation to any secrets that this `FsInfo` has.
 
         This is an optional method because not all filesystems will require secrets to
         be mounted on the client.
         """
-        return
 
     @classmethod
     @abstractmethod
@@ -345,6 +348,8 @@ class NfsInfo(FsInfo):
     @classmethod
     def from_uri(cls, uri: str, _model: Model) -> "NfsInfo":
         """See :py:meth:`FsInfo.from_uri` for documentation on this method."""
+        _logger.debug(f"NfsInfo.from_uri: parsing `{uri}`")
+
         info = _UriData.from_uri(uri)
 
         if info.scheme != cls.fs_type():
@@ -409,6 +414,7 @@ class CephfsInfo(FsInfo):
     @classmethod
     def from_uri(cls, uri: str, model: Model) -> "CephfsInfo":
         """See :py:meth:`FsInfo.from_uri` for documentation on this method."""
+        _logger.debug(f"CephfsInfo.from_uri: parsing `{uri}`")
         info = _UriData.from_uri(uri)
 
         if info.scheme != cls.fs_type():
@@ -444,7 +450,7 @@ class CephfsInfo(FsInfo):
             # they don't support secrets.
             key = data
         else:
-            raise ParseError("Invalid kind for auth info")
+            raise ParseError(f"Invalid kind `{kind}` for auth info")
 
         return CephfsInfo(
             fsid=fsid, name=name, path=path, monitor_hosts=monitor_hosts, user=user, key=key
@@ -480,7 +486,7 @@ class CephfsInfo(FsInfo):
     @classmethod
     def fs_type(cls) -> str:
         """See :py:meth:`FsInfo.fs_type` for documentation on this method."""
-        return "ceph"
+        return "cephfs"
 
     def _get_or_create_auth_secret(self, model: Model) -> ops.Secret:
         try:
@@ -488,7 +494,7 @@ class CephfsInfo(FsInfo):
             secret.set_content({"key": self.key})
         except ops.SecretNotFoundError:
             secret = model.app.add_secret(
-                self.key,
+                {"key": self.key},
                 label="auth",
                 description="Cephx key to authenticate against the CephFS share",
             )
@@ -507,13 +513,13 @@ class Endpoint:
 
 
 def _uri_to_fs_info(uri: str, model: Model) -> FsInfo:
-    match uri.split("://", maxsplit=1)[0]:
-        case "nfs":
-            return NfsInfo.from_uri(uri, model)
-        case "ceph":
-            return CephfsInfo.from_uri(uri, model)
-        case _:
-            raise InterfacesError("unsupported filesystem type")
+    scheme = uri.split("://", maxsplit=1)[0]
+    if scheme == NfsInfo.fs_type():
+        return NfsInfo.from_uri(uri, model)
+    elif scheme == CephfsInfo.fs_type():
+        return CephfsInfo.from_uri(uri, model)
+    else:
+        raise InterfacesError(f"unsupported filesystem type `{scheme}`")
 
 
 class _MountEvent(RelationEvent):
@@ -558,10 +564,11 @@ class _BaseInterface(Object):
         result = []
         for relation in self.charm.model.relations[self.relation_name]:
             try:
+                # Exclude relations that don't have any data yet
                 _ = repr(relation.data)
                 result.append(relation)
             except RuntimeError:
-                pass
+                continue
         return result
 
 
@@ -593,7 +600,7 @@ class FsRequires(_BaseInterface):
         result = []
         for relation in self.relations:
             if not (uri := relation.data[relation.app].get("endpoint")):
-                pass
+                continue
             result.append(Endpoint(fs_info=_uri_to_fs_info(uri, self.model), uri=uri))
         return result
 
